@@ -1,3 +1,8 @@
+!pip install requests
+!pip install numpy
+!pip install python-binance
+!pip install nltk
+
 # import for environment variables and waiting
 import os, time
 
@@ -18,6 +23,7 @@ import numpy as np
 
 # nlp library to analyse sentiment
 import nltk
+nltk.download('vader_lexicon')
 from nltk.sentiment import SentimentIntensityAnalyzer
 
 # needed for the binance API
@@ -60,8 +66,8 @@ keywords = {
     'XRP': ['ripple', 'xrp', 'XRP', 'Ripple', 'RIPPLE'],
     'BTC': ['BTC', 'bitcoin', 'Bitcoin', 'BITCOIN'],
     'XLM': ['Stellar Lumens', 'XLM'],
-    'BCH': ['Bitcoin Cash', 'BCH'],
-    'ETH': ['ETH', 'Ethereum'],
+    #'BCH': ['Bitcoin Cash', 'BCH'],
+    #'ETH': ['ETH', 'Ethereum'],
     'BNB' : ['BNB', 'Binance Coin'],
     'LTC': ['LTC', 'Litecoin']
     }
@@ -77,12 +83,12 @@ PAIRING = 'USDT'
 # define how positive the news should be in order to place a trade
 # the number is a compound of neg, neu and pos values from the nltk analysis
 # input a number between -1 and 1
-SENTIMENT_THRESHOLD = 0.5
-
+SENTIMENT_THRESHOLD = 0
+NEGATIVE_SENTIMENT_THRESHOLD = 0
 # define the minimum number of articles that need to be analysed in order
 # for the sentiment analysis to qualify for a trade signal
 # avoid using 1 as that's not representative of the overall sentiment
-MINUMUM_ARTICLES = 10
+MINUMUM_ARTICLES = 1
 
 # define how often to run the code (check for new + try to place trades)
 # in minutes
@@ -94,12 +100,15 @@ REPEAT_EVERY = 60
 #             Edit with care               #
 ############################################
 
-
+# coins that bought by the bot since its start
+coins_in_hand  = {}
+# initializing the volumes at hand
+for coin in keywords:
+  coins_in_hand[coin] = 0
 
 
 # current price of CRYPTO pulled through the websocket
 CURRENT_PRICE = {}
-
 
 def ticker_socket(msg):
     '''Open a stream for financial information for CRYPTO'''
@@ -265,18 +274,17 @@ def compound_average():
     return compiled_sentiment, headlines_analysed
 
 
-def buy():
+def buy(compiled_sentiment, headlines_analysed):
     '''Check if the sentiment is positive and keyword is found for each handle'''
-    compiled_sentiment, headlines_analysed = compound_average()
     volume = calculate_volume()
 
     for coin in compiled_sentiment:
 
         # check if the sentiment and number of articles are over the given threshold
-        if compiled_sentiment[coin] > SENTIMENT_THRESHOLD and headlines_analysed[coin] > MINUMUM_ARTICLES:
+        if compiled_sentiment[coin] > SENTIMENT_THRESHOLD and headlines_analysed[coin] >= MINUMUM_ARTICLES:
 
             # check the volume looks correct
-            print(f'preparing to buy {coin} with {volume[coin+PAIRING]} USDT at {CURRENT_PRICE[coin+PAIRING]}')
+            print(f'preparing to buy {volume[coin+PAIRING]} {coin} for {QUANTITY} {PAIRING} at {CURRENT_PRICE[coin+PAIRING]}')
 
             # create test order before pushing an actual order
             test_order = client.create_test_order(symbol=coin+PAIRING, side='BUY', type='MARKET', quantity=volume[coin+PAIRING])
@@ -289,6 +297,7 @@ def buy():
                     type='MARKET',
                     quantity=volume[coin+PAIRING]
                 )
+                coins_in_hand[coin] += volume[coin+PAIRING]
 
             #error handling here in case position cannot be placed
             except BinanceAPIException as e:
@@ -312,16 +321,64 @@ def buy():
                 # print order condirmation to the console
                 print(f"order {order[0]['orderId']} has been placed on {coin} with {order[0]['origQty']} at {utc_time} and bought at {bought_at}")
 
-                return bought_at, order
-
         else:
             print(f'Sentiment not positive enough for {coin}, or not enough headlines analysed: {compiled_sentiment[coin]}, {headlines_analysed[coin]}')
 
+def sell(compiled_sentiment, headlines_analysed):
+    '''Check if the sentiment is negative and keyword is found for each handle'''
+    for coin in compiled_sentiment:
 
+        # check if the sentiment and number of articles are over the given threshold
+        if compiled_sentiment[coin] < NEGATIVE_SENTIMENT_THRESHOLD and headlines_analysed[coin] >= MINUMUM_ARTICLES and coins_in_hand[coin]>0:
+
+            # check the volume looks correct
+            print(f'preparing to sell {coins_in_hand[coin]} {coin} at {CURRENT_PRICE[coin+PAIRING]}')
+
+            # create test order before pushing an actual order
+            test_order = client.create_test_order(symbol=coin+PAIRING, side='SELL', type='MARKET', quantity=coins_in_hand[coin]*99.5/100 )
+
+            # try to create a real order if the test orders did not raise an exception
+            try:
+                buy_limit = client.create_order(
+                    symbol=coin+PAIRING,
+                    side='SELL',
+                    type='MARKET',
+                    quantity=coins_in_hand[coin]*99.5/100 
+                )
+                coins_in_hand[coin]=0
+            #error handling here in case position cannot be placed
+            except BinanceAPIException as e:
+                print(e)
+
+            except BinanceOrderException as e:
+                print(e)
+
+            # run the else block if the position has been placed and return some info
+            else:
+                # retrieve the last order
+                order = client.get_all_orders(symbol=coin+PAIRING, limit=1)
+
+                # convert order timsestamp into UTC format
+                time = order[0]['time'] / 1000
+                utc_time = datetime.fromtimestamp(time)
+
+                # grab the price of CRYPTO the order was placed at for reporting
+                sold_at = CURRENT_PRICE[coin+PAIRING]
+
+                # print order condirmation to the console
+                print(f"order {order[0]['orderId']} has been placed on {coin} with {order[0]['origQty']} coins sold for {sold_at} each at {utc_time}")
+
+
+        else:
+            print(f'Sentiment not negative enough for {coin}, not enough headlines analysed or not enough {coin} to sell: {compiled_sentiment[coin]}, {headlines_analysed[coin]}')
 
 if __name__ == '__main__':
     print('Press Ctrl-Q to stop the script')
     for i in count():
-        buy()
+        compiled_sentiment, headlines_analysed = compound_average()
+        print("\nBUY CHECKS:")
+        buy(compiled_sentiment, headlines_analysed)
+        print("\nSELL CHECKS:")
+        sell(compiled_sentiment, headlines_analysed)
         print(f'Iteration {i}')
         time.sleep(60 * REPEAT_EVERY)
